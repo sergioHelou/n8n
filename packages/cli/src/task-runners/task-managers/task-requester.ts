@@ -1,3 +1,4 @@
+import { Service } from '@n8n/di';
 import type { TaskResultData, RequesterMessage, BrokerMessage, TaskData } from '@n8n/task-runner';
 import { AVAILABLE_RPC_METHODS } from '@n8n/task-runner';
 import { isSerializedBuffer, toBuffer } from 'n8n-core';
@@ -18,8 +19,8 @@ import type {
 	Result,
 } from 'n8n-workflow';
 import { nanoid } from 'nanoid';
-import { Service } from 'typedi';
 
+import { EventService } from '@/events/event.service';
 import { NodeTypes } from '@/node-types';
 
 import { DataRequestResponseBuilder } from './data-request-response-builder';
@@ -54,13 +55,14 @@ export abstract class TaskRequester {
 
 	taskAcceptRejects: Map<string, { accept: TaskAccept; reject: TaskReject }> = new Map();
 
-	pendingRequests: Map<string, TaskRequest> = new Map();
-
 	tasks: Map<string, Task> = new Map();
 
 	private readonly dataResponseBuilder = new DataRequestResponseBuilder();
 
-	constructor(private readonly nodeTypes: NodeTypes) {}
+	constructor(
+		private readonly nodeTypes: NodeTypes,
+		private readonly eventService: EventService,
+	) {}
 
 	async startTask<TData, TError>(
 		additionalData: IWorkflowExecuteAdditionalData,
@@ -110,8 +112,6 @@ export abstract class TaskRequester {
 			data,
 		};
 
-		this.pendingRequests.set(request.requestId, request);
-
 		const taskIdPromise = new Promise<string>((resolve, reject) => {
 			this.requestAcceptRejects.set(request.requestId, {
 				accept: resolve,
@@ -134,6 +134,13 @@ export abstract class TaskRequester {
 		};
 		this.tasks.set(task.taskId, task);
 
+		this.eventService.emit('runner-task-requested', {
+			taskId: task.taskId,
+			nodeId: task.data.node.id,
+			workflowId: task.data.workflow.id,
+			executionId: task.data.additionalData.executionId ?? 'unknown',
+		});
+
 		try {
 			const dataPromise = new Promise<TaskResultData>((resolve, reject) => {
 				this.taskAcceptRejects.set(task.taskId, {
@@ -149,6 +156,14 @@ export abstract class TaskRequester {
 			});
 
 			const resultData = await dataPromise;
+
+			this.eventService.emit('runner-response-received', {
+				taskId: task.taskId,
+				nodeId: task.data.node.id,
+				workflowId: task.data.workflow.id,
+				executionId: task.data.additionalData.executionId ?? 'unknown',
+			});
+
 			// Set custom execution data (`$execution.customData`) if sent
 			if (resultData.customData) {
 				Object.entries(resultData.customData).forEach(([k, v]) => {
